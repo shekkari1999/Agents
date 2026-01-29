@@ -22,22 +22,32 @@ class AnswerOutput(BaseModel):
 
 
 async def main():
-    # Create agent with structured output
+    # Create agent with structured output and verbose mode enabled
     agent = Agent(
         model=LlmClient(model="gpt-5-mini"),
         tools=[],
         instructions="You are a helpful assistant that answers questions accurately.",
         output_type=AnswerOutput,
+        verbose=True,  # Enable verbose mode to see thinking process
     )
+    
+    print("Starting agent execution...")
+    print("=" * 60)
     
     result = await agent.run(
         "If Eliud Kipchoge could maintain his marathon pace, "
         "how many thousand hours to reach the Moon?"
     )
     
+    print("\n" + "=" * 60)
+    print("FINAL RESULTS")
+    print("=" * 60)
     print(f"Answer: {result.output.final_answer}")
-    print(f"Steps: {result.context.current_step}")
+    print(f"Steps taken: {result.context.current_step}")
+    print("=" * 60)
     
+    # Optionally show full trace
+    print("\nFull Execution Trace:")
     display_trace(result.context)
 
 

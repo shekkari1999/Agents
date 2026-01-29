@@ -34,12 +34,14 @@ class Agent:
         max_steps: int = 10,
         name: str = "agent",
         output_type: Optional[Type[BaseModel]] = None,
+        verbose: bool = False,
     ):
         self.model = model
         self.instructions = instructions
         self.max_steps = max_steps
         self.name = name
         self.output_type = output_type
+        self.verbose = verbose
         self.tools = self._setup_tools(tools or [])
 
     def _setup_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
@@ -115,6 +117,11 @@ class Agent:
     
     async def step(self, context: ExecutionContext):
         """Execute one step of the agent loop."""
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print(f"Step {context.current_step + 1} - Agent Thinking...")
+            print(f"{'='*60}")
+        
         # Check if we should enforce structured output
         # Only enforce if: we have output_type AND the last event had tool results (meaning tools were used)
         # This allows tool calls to happen first, then we enforce format for final answer
@@ -134,6 +141,11 @@ class Agent:
         # Prepare LLM request - don't enforce output type to allow tool calls
         llm_request = self._prepare_llm_request(context, enforce_output_type=should_enforce_output)
         
+        if self.verbose:
+            print(f"[SENDING] Request to LLM...")
+            if should_enforce_output:
+                print(f"         (Enforcing structured output format)")
+        
         # Get LLM's decision
         llm_response = await self.think(llm_request)
         
@@ -145,9 +157,21 @@ class Agent:
         )
         context.add_event(response_event)
         
+        # Show what the LLM responded with
+        if self.verbose:
+            for item in llm_response.content:
+                if isinstance(item, Message):
+                    print(f"\n[AGENT RESPONSE]")
+                    print(f"   {item.content[:200]}{'...' if len(item.content) > 200 else ''}")
+                elif isinstance(item, ToolCall):
+                    print(f"\n[TOOL CALL] {item.name}")
+                    print(f"   Arguments: {item.arguments}")
+        
         # Execute tools if the LLM requested any
         tool_calls = [c for c in llm_response.content if isinstance(c, ToolCall)]
         if tool_calls:
+            if self.verbose:
+                print(f"\n[EXECUTING] {len(tool_calls)} tool(s)...")
             tool_results = await self.act(context, tool_calls)
             tool_event = Event(
                 execution_id=context.execution_id,
@@ -155,8 +179,20 @@ class Agent:
                 content=tool_results,
             )
             context.add_event(tool_event)
+            
+            if self.verbose:
+                for result in tool_results:
+                    status_marker = "[SUCCESS]" if result.status == "success" else "[ERROR]"
+                    print(f"   {status_marker} {result.name}: {result.status}")
+                    if result.content and len(result.content) > 0:
+                        result_preview = str(result.content[0])[:150]
+                        if len(str(result.content[0])) > 150:
+                            result_preview += "..."
+                        print(f"      Result: {result_preview}")
         elif self.output_type and not should_enforce_output:
             # No tool calls but we didn't enforce output type - make one more call to get structured output
+            if self.verbose:
+                print(f"\n[NO TOOLS] Requesting structured output...")
             final_request = self._prepare_llm_request(context, enforce_output_type=True)
             final_response = await self.think(final_request)
             
@@ -169,6 +205,9 @@ class Agent:
                 )
         
         context.increment_step()
+        
+        if self.verbose:
+            print(f"[COMPLETED] Step {context.current_step}\n")
 
     async def run(
         self, 
