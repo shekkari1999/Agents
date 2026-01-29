@@ -4,11 +4,11 @@ A flexible framework for building AI agents with tool support, MCP integration, 
 
 ## Features
 
-- 🤖 **Agent System**: Multi-step reasoning with tool execution
-- 🛠️ **Tool Framework**: Easy tool creation and integration
-- 🔌 **MCP Integration**: Load tools from MCP servers
-- 💬 **LLM Client**: Unified interface for LLM API calls via LiteLLM
-- 📦 **Modular Design**: Clean, organized package structure
+- **Agent System**: Multi-step reasoning with tool execution
+- **Tool Framework**: Easy tool creation and integration
+- **MCP Integration**: Load tools from MCP servers
+- **LLM Client**: Unified interface for LLM API calls via LiteLLM
+- **Modular Design**: Clean, organized package structure
 
 ## Installation
 

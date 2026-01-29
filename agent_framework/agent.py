@@ -1,8 +1,9 @@
 """Agent class for executing multi-step reasoning with tools."""
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Type
 from pydantic import BaseModel
+import json
 
 from .models import (
     ExecutionContext, 
@@ -32,28 +33,41 @@ class Agent:
         instructions: str = "",
         max_steps: int = 10,
         name: str = "agent",
+        output_type: Optional[Type[BaseModel]] = None,
     ):
         self.model = model
         self.instructions = instructions
         self.max_steps = max_steps
         self.name = name
+        self.output_type = output_type
         self.tools = self._setup_tools(tools or [])
 
     def _setup_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
         return tools
     
-    def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
-        """Convert execution context to LLM request."""
+    def _prepare_llm_request(self, context: ExecutionContext, enforce_output_type: bool = False) -> LlmRequest:
+        """Convert execution context to LLM request.
+        
+        Args:
+            context: Execution context with conversation history
+            enforce_output_type: If True, enforce structured output format.
+                                Only set to True when expecting final answer.
+        """
         # Flatten events into content items
         flat_contents = []
         for event in context.events:
             flat_contents.extend(event.content)
+        
+        # Only enforce structured output if explicitly requested (for final answer)
+        # This allows tool calls to happen first
+        response_format = self.output_type if (enforce_output_type and self.output_type) else None
         
         return LlmRequest(
             instructions=[self.instructions] if self.instructions else [],
             contents=flat_contents,
             tools=self.tools,
             tool_choice="auto" if self.tools else None,
+            response_format=response_format,
         )
     
     async def think(self, llm_request: LlmRequest) -> LlmResponse:
@@ -101,8 +115,24 @@ class Agent:
     
     async def step(self, context: ExecutionContext):
         """Execute one step of the agent loop."""
-        # Prepare what to send to the LLM
-        llm_request = self._prepare_llm_request(context)
+        # Check if we should enforce structured output
+        # Only enforce if: we have output_type AND the last event had tool results (meaning tools were used)
+        # This allows tool calls to happen first, then we enforce format for final answer
+        should_enforce_output = False
+        if self.output_type and len(context.events) > 0:
+            last_event = context.events[-1]
+            # If last event had tool results, we might be ready for final structured answer
+            has_tool_results = any(isinstance(item, ToolResult) for item in last_event.content)
+            if has_tool_results:
+                # Check if the event before that had tool calls
+                if len(context.events) >= 2:
+                    prev_event = context.events[-2]
+                    had_tool_calls = any(isinstance(item, ToolCall) for item in prev_event.content)
+                    # If we had tool calls and got results, next response should be final
+                    should_enforce_output = had_tool_calls
+        
+        # Prepare LLM request - don't enforce output type to allow tool calls
+        llm_request = self._prepare_llm_request(context, enforce_output_type=should_enforce_output)
         
         # Get LLM's decision
         llm_response = await self.think(llm_request)
@@ -125,6 +155,18 @@ class Agent:
                 content=tool_results,
             )
             context.add_event(tool_event)
+        elif self.output_type and not should_enforce_output:
+            # No tool calls but we didn't enforce output type - make one more call to get structured output
+            final_request = self._prepare_llm_request(context, enforce_output_type=True)
+            final_response = await self.think(final_request)
+            
+            # Replace the last event with the structured response
+            if context.events:
+                context.events[-1] = Event(
+                    execution_id=context.execution_id,
+                    author=self.name,
+                    content=final_response.content,
+                )
         
         context.increment_step()
 
@@ -163,9 +205,20 @@ class Agent:
         has_tool_results = any(isinstance(c, ToolResult) for c in event.content)
         return not has_tool_calls and not has_tool_results
     
-    def _extract_final_result(self, event: Event) -> str:
+    def _extract_final_result(self, event: Event):
         """Extract the final result from an event."""
         for item in event.content:
             if isinstance(item, Message) and item.role == "assistant":
-                return item.content
+                content = item.content
+                
+                # If output_type is specified, parse as structured output
+                if self.output_type:
+                    try:
+                        content_json = json.loads(content)
+                        return self.output_type.model_validate(content_json)
+                    except (json.JSONDecodeError, ValueError):
+                        # If parsing fails, return as string
+                        return content
+                
+                return content
         return None

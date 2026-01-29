@@ -20,4 +20,4 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["scratch_agents*"]
+include = ["agent_framework*", "examples*"]

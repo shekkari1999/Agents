@@ -17,6 +17,7 @@ from .utils import (
     format_tool_definition,
     function_to_tool_definition,
     mcp_tools_to_openai_format,
+    display_trace,
 )
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "format_tool_definition",
     "function_to_tool_definition",
     "mcp_tools_to_openai_format",
+    "display_trace",
 ]
 
 __version__ = "0.1.0"
