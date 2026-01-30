@@ -1,20 +1,22 @@
 """Agent class for executing multi-step reasoning with tools."""
 
 from dataclasses import dataclass
-from typing import List, Optional, Type, Callable
-from xxlimited import Str
-from pydantic import BaseModel
+from typing import List, Optional, Type, Callable, Literal
+from pydantic import BaseModel, Field
 from .tools import tool
 import inspect
 import json
 
-from pydantic_core.core_schema import str_schema
 from .models import (
     ExecutionContext, 
     Event, 
     Message, 
     ToolCall, 
-    ToolResult
+    ToolResult,
+    PendingToolCall,
+    ToolConfirmation,
+    BaseSessionManager,
+    InMemorySessionManager
 )
 from .tools import BaseTool
 from .llm import LlmClient, LlmRequest, LlmResponse
@@ -25,6 +27,8 @@ class AgentResult:
     """Result of an agent execution."""
     output: str | BaseModel
     context: ExecutionContext
+    status: Literal["complete", "pending", "error"] = "complete"
+    pending_tool_calls: list[PendingToolCall] = Field(default_factory=list)
 
 
 class Agent:
@@ -39,7 +43,9 @@ class Agent:
         name: str = "agent", 
         output_type: Optional[Type[BaseModel]] = None,
         before_tool_callbacks: List[Callable] = None,
-        after_tool_callbacks: List[Callable] = None
+        after_tool_callbacks: List[Callable] = None,
+        session_manager: BaseSessionManager | None = None
+
 
     ):
         self.model = model
@@ -52,6 +58,10 @@ class Agent:
         # Initialize callback lists
         self.before_tool_callbacks = before_tool_callbacks or []
         self.after_tool_callbacks = after_tool_callbacks or []
+
+        # Session manager
+        self.session_manager = session_manager or InMemorySessionManager()
+
 
     def _setup_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
         if self.output_type is not None:
@@ -71,9 +81,38 @@ class Agent:
     async def run(
         self, 
         user_input: str, 
-        context: ExecutionContext = None
-    ) -> str:
-        """Run the agent with user input."""
+        context: ExecutionContext = None,
+        session_id: Optional[str] = None,
+        tool_confirmations: Optional[List[ToolConfirmation]] = None
+    ) -> AgentResult:
+        """Execute the agent with optional session support.
+        
+        Args:
+            user_input: User's input message
+            context: Optional execution context (creates new if None)
+            session_id: Optional session ID for persistent conversations
+            tool_confirmations: Optional list of tool confirmations for pending calls
+        """
+        # Load or create session if session_id is provided
+        session = None
+        if session_id and self.session_manager:
+            session = await self.session_manager.get_or_create(session_id)
+            # Load session data into context if context is new
+            if context is None:
+                context = ExecutionContext()
+                # Restore events and state from session
+                context.events = session.events.copy()
+                context.state = session.state.copy()
+                context.execution_id = session.session_id
+            context.session_id = session_id
+    
+        if tool_confirmations:
+            if context is None:
+                context = ExecutionContext()
+            context.state["tool_confirmations"] = [
+                c.model_dump() for c in tool_confirmations
+            ]
+        
         # Create or reuse context
         if context is None:
             context = ExecutionContext()
@@ -89,12 +128,34 @@ class Agent:
         # Execute steps until completion or max steps reached
         while not context.final_result and context.current_step < self.max_steps:
             await self.step(context)
-            
+            # Check for pending confirmations after each step
+            if context.state.get("pending_tool_calls"):
+                pending_calls = [
+                    PendingToolCall.model_validate(p)
+                    for p in context.state["pending_tool_calls"]
+                ]
+                # Save session state before returning
+                if session:
+                    session.events = context.events
+                    session.state = context.state
+                    await self.session_manager.save(session)
+                return AgentResult(
+                    status="pending",
+                    context=context,
+                    pending_tool_calls=pending_calls,
+                )
             # Check if the last event is a final response
             last_event = context.events[-1]
             if self._is_final_response(last_event):
                 context.final_result = self._extract_final_result(last_event)
         
+        # Save session after execution completes
+        if session:
+            session.events = context.events
+            session.state = context.state
+            await self.session_manager.save(session)
+
+     
         return AgentResult(output=context.final_result, context=context)
 
 
@@ -128,6 +189,23 @@ class Agent:
 
     async def step(self, context: ExecutionContext):
         """Execute one step of the agent loop."""
+        
+        # Process pending confirmations if both are present (before preparing request)
+        if ("pending_tool_calls" in context.state and "tool_confirmations" in context.state):
+            confirmation_results = await self._process_confirmations(context)
+            
+            # Add results as an event so they appear in contents
+            if confirmation_results:
+                confirmation_event = Event(
+                    execution_id=context.execution_id,
+                    author=self.name,
+                    content=confirmation_results,
+                )
+                context.add_event(confirmation_event)
+            
+            # Clear processed state
+            del context.state["pending_tool_calls"]
+            del context.state["tool_confirmations"]
       
         llm_request = self._prepare_llm_request(context)
        
@@ -194,7 +272,8 @@ class Agent:
 ) -> List[ToolResult]:
         tools_dict = {tool.name: tool for tool in self.tools}
         results = []
-        
+        pending_calls = []  # ADD THIS
+
         for tool_call in tool_calls:
             if tool_call.name not in tools_dict:
                 raise ValueError(f"Tool '{tool_call.name}' not found")
@@ -212,7 +291,17 @@ class Agent:
                 if result is not None:
                     tool_response = result
                     break
-            
+                # Check if confirmation is required
+            if tool.requires_confirmation:
+                pending = PendingToolCall(
+                    tool_call=tool_call,
+                    confirmation_message=tool.get_confirmation_message(
+                        tool_call.arguments
+                    )
+                )
+                pending_calls.append(pending)
+                continue
+                
             # Stage 2: Execute actual tool only if callback didn't provide a result
             if tool_response is None:
                 try:
@@ -238,9 +327,73 @@ class Agent:
                     break
             
             results.append(tool_result)
+        if pending_calls:
+            context.state["pending_tool_calls"] = [p.model_dump() for p in pending_calls]
         
         return results
-            
+    
+    async def _process_confirmations(
+    self,
+    context: ExecutionContext
+) -> List[ToolResult]:
+        tools_dict = {tool.name: tool for tool in self.tools}
+        results = []
+    
+        # Restore pending tool calls from state
+        pending_map = {
+            p["tool_call"]["tool_call_id"]: PendingToolCall.model_validate(p)
+            for p in context.state["pending_tool_calls"]
+        }
+    
+        # Build confirmation lookup by tool_call_id
+        confirmation_map = {
+            c["tool_call_id"]: ToolConfirmation.model_validate(c)
+            for c in context.state["tool_confirmations"]
+        }
+    
+        # Process ALL pending tool calls
+        for tool_call_id, pending in pending_map.items():
+            tool = tools_dict.get(pending.tool_call.name)
+            confirmation = confirmation_map.get(tool_call_id)
+    
+            if confirmation and confirmation.approved:
+                # Merge original arguments with modifications
+                arguments = {
+                    **pending.tool_call.arguments,
+                    **(confirmation.modified_arguments or {})
+                }
+    
+                # Execute the approved tool
+                try:
+                    output = await tool(context, **arguments)
+                    results.append(ToolResult(
+                        tool_call_id=tool_call_id,
+                        name=pending.tool_call.name,
+                        status="success",
+                        content=[output],
+                    ))
+                except Exception as e:
+                    results.append(ToolResult(
+                        tool_call_id=tool_call_id,
+                        name=pending.tool_call.name,
+                        status="error",
+                        content=[str(e)],
+                    ))
+            else:
+                # Rejected: either explicitly or not in confirmation list
+                if confirmation:
+                    reason = confirmation.reason or "Tool execution was rejected by user."
+                else:
+                    reason = "Tool execution was not approved."
+    
+                results.append(ToolResult(
+                    tool_call_id=tool_call_id,
+                    name=pending.tool_call.name,
+                    status="error",
+                    content=[reason],
+                ))
+    
+        return results
     # List of dangerous tools requiring approval
 DANGEROUS_TOOLS = ["delete_file", "send_email", "execute_sql"]
  

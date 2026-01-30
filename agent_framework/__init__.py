@@ -7,9 +7,22 @@ from .models import (
     ContentItem,
     Event,
     ExecutionContext,
+    Session,
+    ToolConfirmation,
+    PendingToolCall,
+    BaseSessionManager,
+    InMemorySessionManager,
 )
 from .tools import BaseTool, FunctionTool, tool
-from .llm import LlmClient, LlmRequest, LlmResponse
+from .llm import LlmClient, LlmRequest, LlmResponse, build_messages
+from .memory import (
+    count_tokens,
+    apply_sliding_window,
+    apply_compaction,
+    apply_summarization,
+    ContextOptimizer,
+)
+from .callbacks import create_optimizer_callback
 from .agent import Agent, AgentResult
 from .mcp import load_mcp_tools
 from .utils import (
@@ -18,6 +31,7 @@ from .utils import (
     function_to_tool_definition,
     mcp_tools_to_openai_format,
     display_trace,
+    format_trace,
 )
 
 __all__ = [
@@ -28,6 +42,11 @@ __all__ = [
     "ContentItem",
     "Event",
     "ExecutionContext",
+    "Session",
+    "ToolConfirmation",
+    "PendingToolCall",
+    "BaseSessionManager",
+    "InMemorySessionManager",
     # Tools
     "BaseTool",
     "FunctionTool",
@@ -36,17 +55,26 @@ __all__ = [
     "LlmClient",
     "LlmRequest",
     "LlmResponse",
+    "build_messages",
     # Agent
     "Agent",
     "AgentResult",
     # MCP
     "load_mcp_tools",
+    # Memory
+    "count_tokens",
+    "apply_sliding_window",
+    "apply_compaction",
+    "apply_summarization",
+    "ContextOptimizer",
+    "create_optimizer_callback",
     # Utils
     "function_to_input_schema",
     "format_tool_definition",
     "function_to_tool_definition",
     "mcp_tools_to_openai_format",
     "display_trace",
+    "format_trace",
 ]
 
 __version__ = "0.1.0"

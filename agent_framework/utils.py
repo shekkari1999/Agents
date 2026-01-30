@@ -79,41 +79,57 @@ def mcp_tools_to_openai_format(mcp_tools) -> list[dict]:
     ]
 
 
+def format_trace(context) -> str:
+    """Format execution trace as a string.
+    
+    Args:
+        context: ExecutionContext to format
+        
+    Returns:
+        Formatted trace string
+    """
+    from .models import Message, ToolCall, ToolResult
+    
+    lines = []
+    lines.append("=" * 60)
+    lines.append(f"Execution Trace (ID: {context.execution_id})")
+    lines.append("=" * 60)
+    lines.append("")
+    
+    for i, event in enumerate(context.events, 1):
+        lines.append(f"Step {i} - {event.author.upper()} ({event.timestamp:.2f})")
+        lines.append("-" * 60)
+        
+        for item in event.content:
+            if isinstance(item, Message):
+                content_preview = item.content[:100] + "..." if len(item.content) > 100 else item.content
+                lines.append(f"  [Message] ({item.role}): {content_preview}")
+            elif isinstance(item, ToolCall):
+                lines.append(f"  [Tool Call] {item.name}")
+                lines.append(f"     Arguments: {item.arguments}")
+            elif isinstance(item, ToolResult):
+                status_marker = "[SUCCESS]" if item.status == "success" else "[ERROR]"
+                lines.append(f"  {status_marker} Tool Result: {item.name} ({item.status})")
+                if item.content:
+                    content_preview = str(item.content[0])[:100]
+                    if len(str(item.content[0])) > 100:
+                        content_preview += "..."
+                    lines.append(f"     Output: {content_preview}")
+        
+        lines.append("")
+    
+    lines.append("=" * 60)
+    lines.append(f"Final Result: {context.final_result}")
+    lines.append(f"Total Steps: {context.current_step}")
+    lines.append("=" * 60)
+    
+    return "\n".join(lines)
+
+
 def display_trace(context):
     """Display the execution trace of an agent run.
     
     Args:
         context: ExecutionContext to display
     """
-    from .models import Event, Message, ToolCall, ToolResult
-    
-    print(f"\n{'='*60}")
-    print(f"Execution Trace (ID: {context.execution_id})")
-    print(f"{'='*60}\n")
-    
-    for i, event in enumerate(context.events, 1):
-        print(f"Step {i} - {event.author.upper()} ({event.timestamp:.2f})")
-        print(f"{'-'*60}")
-        
-        for item in event.content:
-            if isinstance(item, Message):
-                content_preview = item.content[:100] + "..." if len(item.content) > 100 else item.content
-                print(f"  [Message] ({item.role}): {content_preview}")
-            elif isinstance(item, ToolCall):
-                print(f"  [Tool Call] {item.name}")
-                print(f"     Arguments: {item.arguments}")
-            elif isinstance(item, ToolResult):
-                status_marker = "[SUCCESS]" if item.status == "success" else "[ERROR]"
-                print(f"  {status_marker} Tool Result: {item.name} ({item.status})")
-                if item.content:
-                    content_preview = str(item.content[0])[:100]
-                    if len(str(item.content[0])) > 100:
-                        content_preview += "..."
-                    print(f"     Output: {content_preview}")
-        
-        print()
-    
-    print(f"{'='*60}")
-    print(f"Final Result: {context.final_result}")
-    print(f"Total Steps: {context.current_step}")
-    print(f"{'='*60}\n")
+    print(format_trace(context))

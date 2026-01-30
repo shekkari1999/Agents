@@ -42,7 +42,3 @@ embeddings = get_embeddings(sentences)
  
 cat_kitten = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
 cat_dog = cosine_similarity([embeddings[0]], [embeddings[2]])[0][0]
- 
-print(f"Cat vs Kitten: {cat_kitten:.3f}")
-print(f"Cat vs Dog: {cat_dog:.3f}")
- 

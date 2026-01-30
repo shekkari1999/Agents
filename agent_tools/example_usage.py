@@ -20,13 +20,13 @@ async def main():
     agent = Agent(
         model=LlmClient(model="gpt-5-mini"),  # Use a valid model name
         tools=[search_web, list_files, read_file, delete_file],
-        instructions="You are a helpful assistant that have speciality in deleting files",
+        instructions="You are a helpful assistant that can search the web and explore files to answer questions.",
         max_steps=20,
         before_tool_callbacks=[approval_callback],
         after_tool_callbacks=[search_compressor],
     )
     
-    result = await agent.run("delete README.md from the agent_tools directory")   
+    result = await agent.run("search about andrej karpathy")   
     print(result.output)
 
 if __name__ == "__main__":

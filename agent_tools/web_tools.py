@@ -76,23 +76,61 @@ def _extract_search_query(context: ExecutionContext, tool_call_id: str) -> str:
     return ""
 
 ## callbacks
+# def search_compressor(context: ExecutionContext, tool_result: ToolResult):
+#     """Callback that compresses web search results."""
+#     # Pass through unchanged if not a search tool
+#     if tool_result.name != "search_web":
+#         return None
+    
+#     original_content = tool_result.content[0]
+    
+#     # No compression needed if result is short enough
+#     if len(original_content) < 2000:
+#         return None
+    
+#     # Extract search query matching the tool_call_id
+#     query = _extract_search_query(context, tool_result.tool_call_id)
+#     if not query:
+#         return None
+    
+#     # Use functions implemented in section 5.3
+#     chunks = fixed_length_chunking(original_content, chunk_size=500, overlap=50)
+#     embeddings = get_embeddings(chunks)
+#     results = vector_search(query, chunks, embeddings, top_k=3)
+    
+#     # Create compressed result
+#     compressed = "\n\n".join([r['chunk'] for r in results])
+    
+#     return ToolResult(
+#         tool_call_id=tool_result.tool_call_id,
+#         name=tool_result.name,
+#         status="success",
+#         content=[compressed]
+#     )
+
+## callbacks
 def search_compressor(context: ExecutionContext, tool_result: ToolResult):
     """Callback that compresses web search results."""
     # Pass through unchanged if not a search tool
     if tool_result.name != "search_web":
+        print("DEBUG: Callback skipped - not a search_web tool")
         return None
     
     original_content = tool_result.content[0]
+    print(f"DEBUG: Callback triggered! Original content length: {len(original_content)}")
     
     # No compression needed if result is short enough
     if len(original_content) < 2000:
+        print("DEBUG: Callback skipped - content too short")
         return None
     
     # Extract search query matching the tool_call_id
     query = _extract_search_query(context, tool_result.tool_call_id)
     if not query:
+        print("DEBUG: Callback skipped - could not extract query")
         return None
     
+    print(f"DEBUG: Compressing search results for query: {query}")
     # Use functions implemented in section 5.3
     chunks = fixed_length_chunking(original_content, chunk_size=500, overlap=50)
     embeddings = get_embeddings(chunks)
@@ -100,6 +138,7 @@ def search_compressor(context: ExecutionContext, tool_result: ToolResult):
     
     # Create compressed result
     compressed = "\n\n".join([r['chunk'] for r in results])
+    print(f"DEBUG: Compressed from {len(original_content)} to {len(compressed)} chars")
     
     return ToolResult(
         tool_call_id=tool_result.tool_call_id,

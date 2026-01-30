@@ -319,8 +319,15 @@ def _analyze_pdf(file_path: str, query: str) -> str:
     )
     return response.choices[0].message.content
 
-@tool
-def delete_file(file_path: str) -> str:
-    """Deletes a file. This action cannot be undone."""
-    # Only returns message instead of actual deletion (for demo)
-    return f"File {file_path} has been deleted."
+@tool(
+    name="delete_file",
+    description="Delete a file from the filesystem",
+    requires_confirmation=True,
+    confirmation_message="The agent wants to delete a file. Arguments: {arguments}. "
+                        "This action cannot be undone. Do you approve?"
+)
+def delete_file(filename: str) -> str:
+    """Delete the specified file."""
+    import os
+    os.remove(filename)
+    return f"Successfully deleted {filename}"
