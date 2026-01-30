@@ -1,10 +1,11 @@
 """Agent class for executing multi-step reasoning with tools."""
 
 from dataclasses import dataclass
-from typing import List, Optional, Type
+from typing import List, Optional, Type, Callable
 from xxlimited import Str
 from pydantic import BaseModel
 from .tools import tool
+import inspect
 import json
 
 from pydantic_core.core_schema import str_schema
@@ -36,7 +37,9 @@ class Agent:
         instructions: str = "",
         max_steps: int = 5,
         name: str = "agent", 
-        output_type: Optional[Type[BaseModel]] = None
+        output_type: Optional[Type[BaseModel]] = None,
+        before_tool_callbacks: List[Callable] = None,
+        after_tool_callbacks: List[Callable] = None
 
     ):
         self.model = model
@@ -46,6 +49,9 @@ class Agent:
         self.output_type = output_type
         self.output_tool_name = None  
         self.tools = self._setup_tools(tools or [])
+        # Initialize callback lists
+        self.before_tool_callbacks = before_tool_callbacks or []
+        self.after_tool_callbacks = after_tool_callbacks or []
 
     def _setup_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
         if self.output_type is not None:
@@ -195,25 +201,68 @@ class Agent:
             
             tool = tools_dict[tool_call.name]
             
-            try:
-                output = await tool(context, **tool_call.arguments)
-                results.append(ToolResult(
-                    tool_call_id=tool_call.tool_call_id,
-                    name=tool_call.name,
-                    status="success",
-                    content=[output],
-                ))
-            except Exception as e:
-                results.append(ToolResult(
-                    tool_call_id=tool_call.tool_call_id,
-                    name=tool_call.name,
-                    status="error",
-                    content=[str(e)],
-                ))
+            tool_response = None
+            status = "success"
+            
+            # Stage 1: Execute before_tool_callbacks
+            for callback in self.before_tool_callbacks:
+                result = callback(context, tool_call)
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is not None:
+                    tool_response = result
+                    break
+            
+            # Stage 2: Execute actual tool only if callback didn't provide a result
+            if tool_response is None:
+                try:
+                    tool_response = await tool(context, **tool_call.arguments)
+                except Exception as e:
+                    tool_response = str(e)
+                    status = "error"
+            
+            tool_result = ToolResult(
+                tool_call_id=tool_call.tool_call_id,
+                name=tool_call.name,
+                status=status,
+                content=[tool_response],
+            )
+            
+            # Stage 3: Execute after_tool_callbacks
+            for callback in self.after_tool_callbacks:
+                result = callback(context, tool_result)
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is not None:
+                    tool_result = result
+                    break
+            
+            results.append(tool_result)
         
         return results
-        
-        
+            
+    # List of dangerous tools requiring approval
+DANGEROUS_TOOLS = ["delete_file", "send_email", "execute_sql"]
+ 
+def approval_callback(context: ExecutionContext, tool_call: ToolCall):
+    """Requests user approval before executing dangerous tools."""
+    # Execute immediately if not a dangerous tool
+    if tool_call.name not in DANGEROUS_TOOLS:
+        return None
+    
+    print(f"\n Dangerous tool execution requested")
+    print(f"Tool: {tool_call.name}")
+    print(f"Arguments: {tool_call.arguments}")
+    
+    response = input("Do you want to execute? (y/n): ").lower().strip()
+    
+    if response == 'y':
+        print(" Approved. Executing...\n")
+        return None  # Proceed with actual tool execution
+    else:
+        print(" Denied. Skipping execution.\n")
+        return f"User denied execution of {tool_call.name}"
+            
 
-        
+            
 
