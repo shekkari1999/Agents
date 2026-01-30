@@ -10,13 +10,10 @@ from .models import Message, ToolCall, ToolResult, ContentItem
 
 class LlmRequest(BaseModel):
     """Request object for LLM calls."""
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     instructions: List[str] = Field(default_factory=list)
     contents: List[ContentItem] = Field(default_factory=list)
     tools: List[Any] = Field(default_factory=list)
-    tool_choice: Optional[str] = None
-    response_format: Optional[Any] = None  # For structured output (Pydantic models)
+    tool_choice: Optional[str] = 'auto'
 
 
 class LlmResponse(BaseModel):
@@ -38,25 +35,17 @@ class LlmClient:
         try:
             messages = self._build_messages(request)
             tools = [t.tool_definition for t in request.tools] if request.tools else None
+           
+            response = await acompletion(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                **({"tool_choice": request.tool_choice} 
+                   if request.tool_choice else {}),
+                **self.config
+            )
             
-            completion_kwargs = {
-                "model": self.model,
-                "messages": messages,
-            }
-            
-            if tools:
-                completion_kwargs["tools"] = tools
-                if request.tool_choice:
-                    completion_kwargs["tool_choice"] = request.tool_choice
-            
-            if request.response_format:
-                completion_kwargs["response_format"] = request.response_format
-            
-            completion_kwargs.update(self.config)
-            
-            response = await acompletion(**completion_kwargs)
-            
-            return self._parse_response(response, request.response_format)
+            return self._parse_response(response)
         except Exception as e:
             return LlmResponse(error_message=str(e))
 
@@ -99,35 +88,17 @@ class LlmClient:
         
         return messages
 
-    def _parse_response(self, response, response_format=None) -> LlmResponse:
+    def _parse_response(self, response) -> LlmResponse:
         """Convert API response to LlmResponse."""
         choice = response.choices[0]
         content_items = []
         
-        # Handle structured output (Pydantic models)
-        if response_format and choice.message.content:
-            try:
-                # Parse JSON and validate against Pydantic model
-                import json
-                content_json = json.loads(choice.message.content)
-                structured_output = response_format.model_validate(content_json)
-                # Store as string representation for now, will be parsed in Agent
-                content_items.append(Message(
-                    role="assistant",
-                    content=choice.message.content
-                ))
-            except Exception:
-                # Fallback to regular content if parsing fails
-                content_items.append(Message(
-                    role="assistant",
-                    content=choice.message.content
-                ))
-        elif choice.message.content:
+        if choice.message.content:
             content_items.append(Message(
                 role="assistant",
                 content=choice.message.content
             ))
-        
+    
         if choice.message.tool_calls:
             for tc in choice.message.tool_calls:
                 content_items.append(ToolCall(

@@ -2,9 +2,12 @@
 
 from dataclasses import dataclass
 from typing import List, Optional, Type
+from xxlimited import Str
 from pydantic import BaseModel
+from .tools import tool
 import json
 
+from pydantic_core.core_schema import str_schema
 from .models import (
     ExecutionContext, 
     Event, 
@@ -31,189 +34,39 @@ class Agent:
         model: LlmClient,
         tools: List[BaseTool] = None,
         instructions: str = "",
-        max_steps: int = 10,
-        name: str = "agent",
-        output_type: Optional[Type[BaseModel]] = None,
-        verbose: bool = False,
+        max_steps: int = 5,
+        name: str = "agent", 
+        output_type: Optional[Type[BaseModel]] = None
+
     ):
         self.model = model
         self.instructions = instructions
         self.max_steps = max_steps
-        self.name = name
+        self.name = name  
         self.output_type = output_type
-        self.verbose = verbose
+        self.output_tool_name = None  
         self.tools = self._setup_tools(tools or [])
 
     def _setup_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
+        if self.output_type is not None:
+            @tool(
+                name="final_answer",
+                description="Return the final structured answer matching the required schema."
+            )
+            def final_answer(output: self.output_type) -> self.output_type:
+                return output
+            
+            tools = list(tools)  # Create a copy to avoid modifying the original
+            tools.append(final_answer)
+            self.output_tool_name = "final_answer"
+        
         return tools
     
-    def _prepare_llm_request(self, context: ExecutionContext, enforce_output_type: bool = False) -> LlmRequest:
-        """Convert execution context to LLM request.
-        
-        Args:
-            context: Execution context with conversation history
-            enforce_output_type: If True, enforce structured output format.
-                                Only set to True when expecting final answer.
-        """
-        # Flatten events into content items
-        flat_contents = []
-        for event in context.events:
-            flat_contents.extend(event.content)
-        
-        # Only enforce structured output if explicitly requested (for final answer)
-        # This allows tool calls to happen first
-        response_format = self.output_type if (enforce_output_type and self.output_type) else None
-        
-        return LlmRequest(
-            instructions=[self.instructions] if self.instructions else [],
-            contents=flat_contents,
-            tools=self.tools,
-            tool_choice="auto" if self.tools else None,
-            response_format=response_format,
-        )
-    
-    async def think(self, llm_request: LlmRequest) -> LlmResponse:
-        """Get LLM's response/decision."""
-        return await self.model.generate(llm_request)
-    
-    async def act(
-        self, 
-        context: ExecutionContext, 
-        tool_calls: List[ToolCall]
-    ) -> List[ToolResult]:
-        """Execute tool calls and return results."""
-        tools_dict = {tool.name: tool for tool in self.tools}
-        results = []
-        
-        for tool_call in tool_calls:
-            if tool_call.name not in tools_dict:
-                results.append(ToolResult(
-                    tool_call_id=tool_call.tool_call_id,
-                    name=tool_call.name,
-                    status="error",
-                    content=[f"Tool '{tool_call.name}' not found"],
-                ))
-                continue
-            
-            tool = tools_dict[tool_call.name]
-            
-            try:
-                output = await tool.execute(context, **tool_call.arguments)
-                results.append(ToolResult(
-                    tool_call_id=tool_call.tool_call_id,
-                    name=tool_call.name,
-                    status="success",
-                    content=[str(output)],
-                ))
-            except Exception as e:
-                results.append(ToolResult(
-                    tool_call_id=tool_call.tool_call_id,
-                    name=tool_call.name,
-                    status="error",
-                    content=[str(e)],
-                ))
-        
-        return results
-    
-    async def step(self, context: ExecutionContext):
-        """Execute one step of the agent loop."""
-        if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"Step {context.current_step + 1} - Agent Thinking...")
-            print(f"{'='*60}")
-        
-        # Check if we should enforce structured output
-        # Only enforce if: we have output_type AND the last event had tool results (meaning tools were used)
-        # This allows tool calls to happen first, then we enforce format for final answer
-        should_enforce_output = False
-        if self.output_type and len(context.events) > 0:
-            last_event = context.events[-1]
-            # If last event had tool results, we might be ready for final structured answer
-            has_tool_results = any(isinstance(item, ToolResult) for item in last_event.content)
-            if has_tool_results:
-                # Check if the event before that had tool calls
-                if len(context.events) >= 2:
-                    prev_event = context.events[-2]
-                    had_tool_calls = any(isinstance(item, ToolCall) for item in prev_event.content)
-                    # If we had tool calls and got results, next response should be final
-                    should_enforce_output = had_tool_calls
-        
-        # Prepare LLM request - don't enforce output type to allow tool calls
-        llm_request = self._prepare_llm_request(context, enforce_output_type=should_enforce_output)
-        
-        if self.verbose:
-            print(f"[SENDING] Request to LLM...")
-            if should_enforce_output:
-                print(f"         (Enforcing structured output format)")
-        
-        # Get LLM's decision
-        llm_response = await self.think(llm_request)
-        
-        # Record LLM response as an event
-        response_event = Event(
-            execution_id=context.execution_id,
-            author=self.name,
-            content=llm_response.content,
-        )
-        context.add_event(response_event)
-        
-        # Show what the LLM responded with
-        if self.verbose:
-            for item in llm_response.content:
-                if isinstance(item, Message):
-                    print(f"\n[AGENT RESPONSE]")
-                    print(f"   {item.content[:200]}{'...' if len(item.content) > 200 else ''}")
-                elif isinstance(item, ToolCall):
-                    print(f"\n[TOOL CALL] {item.name}")
-                    print(f"   Arguments: {item.arguments}")
-        
-        # Execute tools if the LLM requested any
-        tool_calls = [c for c in llm_response.content if isinstance(c, ToolCall)]
-        if tool_calls:
-            if self.verbose:
-                print(f"\n[EXECUTING] {len(tool_calls)} tool(s)...")
-            tool_results = await self.act(context, tool_calls)
-            tool_event = Event(
-                execution_id=context.execution_id,
-                author=self.name,
-                content=tool_results,
-            )
-            context.add_event(tool_event)
-            
-            if self.verbose:
-                for result in tool_results:
-                    status_marker = "[SUCCESS]" if result.status == "success" else "[ERROR]"
-                    print(f"   {status_marker} {result.name}: {result.status}")
-                    if result.content and len(result.content) > 0:
-                        result_preview = str(result.content[0])[:150]
-                        if len(str(result.content[0])) > 150:
-                            result_preview += "..."
-                        print(f"      Result: {result_preview}")
-        elif self.output_type and not should_enforce_output:
-            # No tool calls but we didn't enforce output type - make one more call to get structured output
-            if self.verbose:
-                print(f"\n[NO TOOLS] Requesting structured output...")
-            final_request = self._prepare_llm_request(context, enforce_output_type=True)
-            final_response = await self.think(final_request)
-            
-            # Replace the last event with the structured response
-            if context.events:
-                context.events[-1] = Event(
-                    execution_id=context.execution_id,
-                    author=self.name,
-                    content=final_response.content,
-                )
-        
-        context.increment_step()
-        
-        if self.verbose:
-            print(f"[COMPLETED] Step {context.current_step}\n")
-
     async def run(
         self, 
         user_input: str, 
         context: ExecutionContext = None
-    ) -> AgentResult:
+    ) -> str:
         """Run the agent with user input."""
         # Create or reuse context
         if context is None:
@@ -238,26 +91,129 @@ class Agent:
         
         return AgentResult(output=context.final_result, context=context)
 
+
     def _is_final_response(self, event: Event) -> bool:
         """Check if this event contains a final response."""
+        if self.output_tool_name:
+        # For structured output: check if final_answer tool succeeded
+            for item in event.content:
+                if (isinstance(item, ToolResult) 
+                    and item.name == self.output_tool_name 
+                    and item.status == "success"):
+                    return True
+            return False
         has_tool_calls = any(isinstance(c, ToolCall) for c in event.content)
         has_tool_results = any(isinstance(c, ToolResult) for c in event.content)
         return not has_tool_calls and not has_tool_results
     
-    def _extract_final_result(self, event: Event):
-        """Extract the final result from an event."""
+    def _extract_final_result(self, event: Event) -> str:
+        if self.output_tool_name:
+            # Extract structured output from final_answer tool result
+            for item in event.content:
+                if (isinstance(item, ToolResult) 
+                    and item.name == self.output_tool_name 
+                    and item.status == "success" 
+                    and item.content):
+                    return item.content[0]
         for item in event.content:
             if isinstance(item, Message) and item.role == "assistant":
-                content = item.content
-                
-                # If output_type is specified, parse as structured output
-                if self.output_type:
-                    try:
-                        content_json = json.loads(content)
-                        return self.output_type.model_validate(content_json)
-                    except (json.JSONDecodeError, ValueError):
-                        # If parsing fails, return as string
-                        return content
-                
-                return content
+                return item.content
         return None
+
+    async def step(self, context: ExecutionContext):
+        """Execute one step of the agent loop."""
+      
+        llm_request = self._prepare_llm_request(context)
+       
+        # Get LLM's decision
+        llm_response = await self.think(llm_request)
+        
+        
+        # Record LLM response as an event
+        response_event = Event(
+            execution_id=context.execution_id,
+            author=self.name,
+            content=llm_response.content,
+        )
+        context.add_event(response_event)
+        
+        
+        # Execute tools if the LLM requested any
+        tool_calls = [c for c in llm_response.content if isinstance(c, ToolCall)]
+        if tool_calls:
+            tool_results = await self.act(context, tool_calls)
+            tool_event = Event(
+                execution_id=context.execution_id,
+                author=self.name,
+                content=tool_results,
+            )
+            context.add_event(tool_event)
+            
+           
+        context.increment_step()
+       
+    def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
+        """Convert execution context to LLM request.
+        
+        Args:
+            context: Execution context with conversation history
+            enforce_output_type: If True, enforce structured output format.
+                                Only set to True when expecting final answer.
+        """
+        # Flatten events into content items
+        flat_contents = []
+        for event in context.events:
+            flat_contents.extend(event.content)
+        # Determine tool choice strategy
+        if self.output_tool_name:
+            tool_choice = "required"  # Force tool usage for structured output
+        elif self.tools:
+            tool_choice = "auto"
+        else:
+            tool_choice = None
+
+        return LlmRequest(
+            instructions=[self.instructions] if self.instructions else [],
+            contents=flat_contents,
+            tools=self.tools,
+            tool_choice = tool_choice 
+        )
+    async def think(self, llm_request: LlmRequest) -> LlmResponse:
+        """Get LLM's response/decision."""
+        return await self.model.generate(llm_request) 
+    async def act(
+    self, 
+    context: ExecutionContext, 
+    tool_calls: List[ToolCall]
+) -> List[ToolResult]:
+        tools_dict = {tool.name: tool for tool in self.tools}
+        results = []
+        
+        for tool_call in tool_calls:
+            if tool_call.name not in tools_dict:
+                raise ValueError(f"Tool '{tool_call.name}' not found")
+            
+            tool = tools_dict[tool_call.name]
+            
+            try:
+                output = await tool(context, **tool_call.arguments)
+                results.append(ToolResult(
+                    tool_call_id=tool_call.tool_call_id,
+                    name=tool_call.name,
+                    status="success",
+                    content=[output],
+                ))
+            except Exception as e:
+                results.append(ToolResult(
+                    tool_call_id=tool_call.tool_call_id,
+                    name=tool_call.name,
+                    status="error",
+                    content=[str(e)],
+                ))
+        
+        return results
+        
+        
+
+        
+
