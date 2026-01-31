@@ -1,6 +1,6 @@
 # Exercises and Challenges
 
-This document contains exercises for each episode to reinforce learning.
+This document contains exercises for each episode to reinforce learning. Exercises are designed to build incrementally toward the actual codebase implementation.
 
 ---
 
@@ -181,52 +181,73 @@ async def temperature_experiment(prompt: str):
 
 ## Episode 3: Core Data Models
 
-### Exercise 1: Add Metadata Field
-Add a `metadata` field to the `Event` model that stores arbitrary key-value pairs.
+### Exercise 1: Build ToolConfirmation Model
+Create the `ToolConfirmation` model that captures a user's decision on a pending tool call. It should have:
+- `tool_call_id`: string (required) - links to the pending tool call
+- `approved`: boolean (required) - whether user approved
+- `modified_arguments`: optional dict - if user wants to change arguments
+- `reason`: optional string - reason for rejection
 
 **Solution:**
 ```python
-class Event(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    execution_id: str
-    timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
-    author: str
-    content: List[ContentItem] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)  # Added
-```
+from pydantic import BaseModel
 
-### Exercise 2: Validation
-Add validation to ensure Message content is not empty.
-
-**Solution:**
-```python
-from pydantic import field_validator
-
-class Message(BaseModel):
-    type: Literal["message"] = "message"
-    role: Literal["system", "user", "assistant", "tool"]
-    content: str
+class ToolConfirmation(BaseModel):
+    """User's decision on a pending tool call."""
     
-    @field_validator('content')
-    def validate_content(cls, v):
-        if not v or not v.strip():
-            raise ValueError('Content cannot be empty')
-        return v
+    tool_call_id: str
+    approved: bool
+    modified_arguments: dict | None = None
+    reason: str | None = None  # Reason for rejection
 ```
 
-### Exercise 3: Extract Messages Helper
-Create a helper function to extract all messages from a list of events.
+### Exercise 2: Build PendingToolCall Model
+Create the `PendingToolCall` model that wraps a ToolCall awaiting confirmation:
+- `tool_call`: ToolCall (required) - the original tool call
+- `confirmation_message`: string (required) - message to show user
 
 **Solution:**
 ```python
-def extract_messages(events: List[Event]) -> List[Message]:
-    """Extract all messages from events."""
-    messages = []
-    for event in events:
-        for item in event.content:
-            if isinstance(item, Message):
-                messages.append(item)
-    return messages
+class PendingToolCall(BaseModel):
+    """A tool call awaiting user confirmation."""
+    
+    tool_call: ToolCall  # Assumes ToolCall is already defined
+    confirmation_message: str
+```
+
+### Exercise 3: Add Validation to ToolConfirmation
+Add a validator that requires `reason` when `approved=False`.
+
+**Solution:**
+```python
+from pydantic import BaseModel, model_validator
+
+class ToolConfirmation(BaseModel):
+    """User's decision on a pending tool call."""
+    
+    tool_call_id: str
+    approved: bool
+    modified_arguments: dict | None = None
+    reason: str | None = None
+    
+    @model_validator(mode='after')
+    def validate_reason_on_rejection(self):
+        if not self.approved and not self.reason:
+            raise ValueError('reason is required when approved=False')
+        return self
+```
+
+### Exercise 4: Extract Pending Calls Helper
+Create a helper function to extract pending tool calls from ExecutionContext state.
+
+**Solution:**
+```python
+from typing import List
+
+def extract_pending_calls(context: ExecutionContext) -> List[PendingToolCall]:
+    """Extract all pending tool calls from context state."""
+    raw_pending = context.state.get("pending_tool_calls", [])
+    return [PendingToolCall.model_validate(p) for p in raw_pending]
 ```
 
 ---
@@ -347,40 +368,59 @@ def display_step_trace(self, context: ExecutionContext, step: int):
 
 ## Episode 6: Building the Tool System
 
-### Exercise 1: Optional Type Support
-Add support for `Optional` types in schema generation.
+### Exercise 1: Add requires_confirmation to a Tool
+Create a `delete_file` tool that requires confirmation before execution.
 
 **Solution:**
 ```python
-from typing import get_origin, get_args
+from agent_framework import tool
 
-def function_to_input_schema(func) -> dict:
-    # ... existing code ...
-    
-    for param in signature.parameters.values():
-        # Handle Optional types
-        if get_origin(param.annotation) is Union:
-            args = get_args(param.annotation)
-            if type(None) in args:
-                # It's Optional, use the non-None type
-                param_type = type_map.get(args[0], "string")
-            else:
-                param_type = type_map.get(param.annotation, "string")
-        else:
-            param_type = type_map.get(param.annotation, "string")
-        
-        parameters[param.name] = {"type": param_type}
-        
-        # Don't require if has default or is Optional
-        if param.default != inspect._empty or get_origin(param.annotation) is Union:
-            # Don't add to required
-            pass
-        else:
-            required.append(param.name)
+@tool(
+    requires_confirmation=True,
+    confirmation_message="Delete file '{arguments[filename]}'? This cannot be undone."
+)
+def delete_file(filename: str) -> str:
+    """Delete a file from the filesystem."""
+    import os
+    os.remove(filename)
+    return f"Deleted {filename}"
+
+# Test it
+print(delete_file.requires_confirmation)  # True
+print(delete_file.get_confirmation_message({"filename": "test.txt"}))
+# "Delete file 'test.txt'? This cannot be undone."
 ```
 
-### Exercise 2: Tool Registry
-Create a tool registry to manage all available tools.
+### Exercise 2: Create Custom Confirmation Message Template
+Create a `send_email` tool with a detailed confirmation message.
+
+**Solution:**
+```python
+@tool(
+    requires_confirmation=True,
+    confirmation_message=(
+        "Send email?\n"
+        "  To: {arguments[recipient]}\n"
+        "  Subject: {arguments[subject]}\n"
+        "  Body preview: {arguments[body][:50]}..."
+    )
+)
+def send_email(recipient: str, subject: str, body: str) -> str:
+    """Send an email to a recipient."""
+    # ... email sending logic ...
+    return f"Email sent to {recipient}"
+
+# Test confirmation message
+msg = send_email.get_confirmation_message({
+    "recipient": "user@example.com",
+    "subject": "Hello",
+    "body": "This is a test email with some content that is quite long..."
+})
+print(msg)
+```
+
+### Exercise 3: Tool Registry with Confirmation Status
+Create a tool registry that tracks confirmation requirements.
 
 **Solution:**
 ```python
@@ -399,70 +439,181 @@ class ToolRegistry:
     def list_all(self) -> List[BaseTool]:
         """List all registered tools."""
         return list(self._tools.values())
+    
+    def list_dangerous(self) -> List[BaseTool]:
+        """List tools requiring confirmation."""
+        return [t for t in self._tools.values() if t.requires_confirmation]
+    
+    def list_safe(self) -> List[BaseTool]:
+        """List tools not requiring confirmation."""
+        return [t for t in self._tools.values() if not t.requires_confirmation]
 
 # Usage
 registry = ToolRegistry()
 registry.register(calculator)
-registry.register(search_web)
+registry.register(delete_file)
+print(f"Safe tools: {[t.name for t in registry.list_safe()]}")
+print(f"Dangerous tools: {[t.name for t in registry.list_dangerous()]}")
 ```
 
 ---
 
-## Episode 7: Tool Execution
+## Episode 7: Tool Execution with Confirmation
 
-### Exercise 1: Tool Execution Timeout
-Add timeout support for tool execution.
+### Exercise 1: Implement Pending Tool Call Detection
+Write the logic to detect when a tool requires confirmation and create a PendingToolCall.
+
+**Solution:**
+```python
+async def act(
+    self, 
+    context: ExecutionContext, 
+    tool_calls: List[ToolCall]
+) -> List[ToolResult]:
+    tools_dict = {tool.name: tool for tool in self.tools}
+    results = []
+    pending_calls = []
+
+    for tool_call in tool_calls:
+        tool = tools_dict[tool_call.name]
+        
+        # Check if confirmation is required
+        if tool.requires_confirmation:
+            pending = PendingToolCall(
+                tool_call=tool_call,
+                confirmation_message=tool.get_confirmation_message(
+                    tool_call.arguments
+                )
+            )
+            pending_calls.append(pending)
+            continue  # Skip execution
+        
+        # Execute tool normally
+        try:
+            result = await tool(context, **tool_call.arguments)
+            status = "success"
+        except Exception as e:
+            result = str(e)
+            status = "error"
+        
+        results.append(ToolResult(
+            tool_call_id=tool_call.tool_call_id,
+            name=tool_call.name,
+            status=status,
+            content=[result]
+        ))
+    
+    # Store pending calls in state
+    if pending_calls:
+        context.state["pending_tool_calls"] = [
+            p.model_dump() for p in pending_calls
+        ]
+    
+    return results
+```
+
+### Exercise 2: Build Confirmation Processing Logic
+Implement `_process_confirmations` that handles approved and rejected tools.
+
+**Solution:**
+```python
+async def _process_confirmations(
+    self,
+    context: ExecutionContext
+) -> List[ToolResult]:
+    tools_dict = {tool.name: tool for tool in self.tools}
+    results = []
+
+    # Build maps
+    pending_map = {
+        p["tool_call"]["tool_call_id"]: PendingToolCall.model_validate(p)
+        for p in context.state["pending_tool_calls"]
+    }
+    confirmation_map = {
+        c["tool_call_id"]: ToolConfirmation.model_validate(c)
+        for c in context.state["tool_confirmations"]
+    }
+
+    for tool_call_id, pending in pending_map.items():
+        tool = tools_dict.get(pending.tool_call.name)
+        confirmation = confirmation_map.get(tool_call_id)
+
+        if confirmation and confirmation.approved:
+            # Merge modified arguments
+            arguments = {
+                **pending.tool_call.arguments,
+                **(confirmation.modified_arguments or {})
+            }
+            
+            try:
+                output = await tool(context, **arguments)
+                results.append(ToolResult(
+                    tool_call_id=tool_call_id,
+                    name=pending.tool_call.name,
+                    status="success",
+                    content=[output],
+                ))
+            except Exception as e:
+                results.append(ToolResult(
+                    tool_call_id=tool_call_id,
+                    name=pending.tool_call.name,
+                    status="error",
+                    content=[str(e)],
+                ))
+        else:
+            # Rejected
+            reason = (confirmation.reason if confirmation 
+                      else "Tool execution was not approved.")
+            results.append(ToolResult(
+                tool_call_id=tool_call_id,
+                name=pending.tool_call.name,
+                status="error",
+                content=[reason],
+            ))
+
+    return results
+```
+
+### Exercise 3: Test Complete Confirmation Workflow
+Write a test that demonstrates the full confirmation workflow.
 
 **Solution:**
 ```python
 import asyncio
+from agent_framework import Agent, LlmClient, ToolConfirmation, tool
 
-async def act(self, context: ExecutionContext, tool_calls: List[ToolCall], timeout: int = 30):
-    """Execute tool calls with timeout."""
-    tools_dict = {tool.name: tool for tool in self.tools}
-    results = []
-    
-    for tool_call in tool_calls:
-        tool = tools_dict[tool_call.name]
-        
-        try:
-            tool_response = await asyncio.wait_for(
-                tool(context, **tool_call.arguments),
-                timeout=timeout
-            )
-            status = "success"
-        except asyncio.TimeoutError:
-            tool_response = f"Tool execution timed out after {timeout} seconds"
-            status = "error"
-        except Exception as e:
-            tool_response = str(e)
-            status = "error"
-        
-        # ... create ToolResult ...
-```
+@tool(requires_confirmation=True)
+def dangerous_action(action: str) -> str:
+    """Perform a dangerous action."""
+    return f"Executed: {action}"
 
-### Exercise 2: Tool Usage Statistics
-Track which tools are used and how often.
+async def test_confirmation_workflow():
+    agent = Agent(
+        model=LlmClient(model="gpt-4o-mini"),
+        tools=[dangerous_action],
+        instructions="Execute dangerous actions when asked."
+    )
+    
+    # Step 1: Initial request triggers pending
+    result1 = await agent.run("Execute the dangerous action 'delete_all'")
+    print(f"Status: {result1.status}")  # "pending"
+    print(f"Pending: {result1.pending_tool_calls[0].confirmation_message}")
+    
+    # Step 2: User approves
+    confirmation = ToolConfirmation(
+        tool_call_id=result1.pending_tool_calls[0].tool_call.tool_call_id,
+        approved=True
+    )
+    
+    result2 = await agent.run(
+        "",  # Empty - resuming
+        context=result1.context,
+        tool_confirmations=[confirmation]
+    )
+    print(f"Status: {result2.status}")  # "complete"
+    print(f"Output: {result2.output}")
 
-**Solution:**
-```python
-class Agent:
-    def __init__(self, ...):
-        # ... existing code ...
-        self.tool_stats: Dict[str, int] = {}
-    
-    async def act(self, context: ExecutionContext, tool_calls: List[ToolCall]):
-        # ... existing code ...
-        
-        for tool_call in tool_calls:
-            # Track usage
-            self.tool_stats[tool_call.name] = self.tool_stats.get(tool_call.name, 0) + 1
-            
-            # ... execute tool ...
-    
-    def get_tool_stats(self) -> Dict[str, int]:
-        """Get tool usage statistics."""
-        return self.tool_stats.copy()
+asyncio.run(test_confirmation_workflow())
 ```
 
 ---
@@ -509,7 +660,6 @@ async def check_mcp_health(connection: Dict) -> bool:
         async with stdio_client(StdioServerParameters(**connection)) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                # Try to list tools as health check
                 await session.list_tools()
                 return True
     except Exception:
@@ -520,12 +670,43 @@ async def check_mcp_health(connection: Dict) -> bool:
 
 ## Episode 9: Session & Memory Management
 
-### Exercise 1: Database Session Manager
-Implement a database-backed session manager.
+### Exercise 1: Build Session Restoration Logic
+Implement the logic to restore session data into ExecutionContext.
+
+**Solution:**
+```python
+async def run(
+    self, 
+    user_input: str, 
+    session_id: Optional[str] = None,
+    context: ExecutionContext = None
+) -> AgentResult:
+    # Load session if provided
+    session = None
+    if session_id and self.session_manager:
+        session = await self.session_manager.get_or_create(session_id)
+        
+        # Restore into context
+        if context is None:
+            context = ExecutionContext()
+            context.events = session.events.copy()
+            context.state = session.state.copy()
+            context.execution_id = session.session_id
+        context.session_id = session_id
+    
+    if context is None:
+        context = ExecutionContext()
+    
+    # ... rest of run logic ...
+```
+
+### Exercise 2: Implement Database Session Manager
+Create a SQLite-backed session manager.
 
 **Solution:**
 ```python
 import sqlite3
+import json
 from datetime import datetime
 
 class DatabaseSessionManager(BaseSessionManager):
@@ -547,6 +728,32 @@ class DatabaseSessionManager(BaseSessionManager):
         """)
         conn.close()
     
+    async def create(self, session_id: str, user_id: str | None = None) -> Session:
+        session = Session(session_id=session_id, user_id=user_id)
+        await self.save(session)
+        return session
+    
+    async def get(self, session_id: str) -> Session | None:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?",
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row is None:
+            return None
+        
+        return Session(
+            session_id=row[0],
+            user_id=row[1],
+            events=[Event.model_validate(e) for e in json.loads(row[2])],
+            state=json.loads(row[3]),
+            created_at=datetime.fromisoformat(row[4]),
+            updated_at=datetime.fromisoformat(row[5])
+        )
+    
     async def save(self, session: Session) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
@@ -565,30 +772,47 @@ class DatabaseSessionManager(BaseSessionManager):
         conn.close()
 ```
 
-### Exercise 2: Token Usage Dashboard
-Create a function to display token usage statistics.
+### Exercise 3: Session with Pending Tool Calls
+Test that pending tool calls persist across session saves.
 
 **Solution:**
 ```python
-def display_token_usage(context: ExecutionContext, model_id: str = "gpt-4"):
-    """Display token usage statistics."""
-    from agent_framework.memory import count_tokens
-    from agent_framework.llm import LlmRequest
+async def test_session_with_pending():
+    session_manager = InMemorySessionManager()
     
-    total_tokens = 0
-    request_count = 0
+    agent = Agent(
+        model=LlmClient(model="gpt-4o-mini"),
+        tools=[delete_file],  # requires confirmation
+        session_manager=session_manager
+    )
     
-    for event in context.events:
-        if event.author != "user":
-            # Estimate tokens for this step
-            request = LlmRequest(contents=[item for item in event.content])
-            tokens = count_tokens(request, model_id)
-            total_tokens += tokens
-            request_count += 1
+    session_id = "test-session"
     
-    print(f"Total Requests: {request_count}")
-    print(f"Estimated Total Tokens: {total_tokens}")
-    print(f"Average per Request: {total_tokens / request_count if request_count else 0}")
+    # First call - should return pending
+    result1 = await agent.run("Delete test.txt", session_id=session_id)
+    assert result1.status == "pending"
+    
+    # Check session was saved with pending state
+    session = await session_manager.get(session_id)
+    assert "pending_tool_calls" in session.state
+    print(f"Session has {len(session.state['pending_tool_calls'])} pending calls")
+    
+    # Resume with confirmation
+    confirmation = ToolConfirmation(
+        tool_call_id=result1.pending_tool_calls[0].tool_call.tool_call_id,
+        approved=True
+    )
+    
+    result2 = await agent.run("", session_id=session_id, 
+                               tool_confirmations=[confirmation])
+    assert result2.status == "complete"
+    
+    # Check pending was cleared
+    session = await session_manager.get(session_id)
+    assert "pending_tool_calls" not in session.state
+    print("Session pending calls cleared after completion")
+
+asyncio.run(test_session_with_pending())
 ```
 
 ---
@@ -617,53 +841,135 @@ async def websocket_chat(websocket: WebSocket):
             result = await agent.run(message, session_id=session_id)
             session_id = result.context.session_id
             
-            # Stream response
             await websocket.send_json({
                 "type": "response",
                 "content": result.output
             })
 ```
 
-### Exercise 2: User Authentication
-Add basic user authentication.
+### Exercise 2: Confirmation UI
+Add a UI component for handling tool confirmations.
 
 **Solution:**
-```python
-from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBearer
+```javascript
+// In index.html
+async function handlePendingToolCalls(pendingCalls) {
+    const modal = document.getElementById('confirmationModal');
+    const content = document.getElementById('confirmationContent');
+    
+    content.innerHTML = pendingCalls.map(pending => `
+        <div class="pending-call" data-id="${pending.tool_call.tool_call_id}">
+            <p>${pending.confirmation_message}</p>
+            <button onclick="approveToolCall('${pending.tool_call.tool_call_id}')">
+                Approve
+            </button>
+            <button onclick="rejectToolCall('${pending.tool_call.tool_call_id}')">
+                Reject
+            </button>
+        </div>
+    `).join('');
+    
+    modal.style.display = 'block';
+}
 
-security = HTTPBearer()
+async function approveToolCall(toolCallId) {
+    const confirmation = {
+        tool_call_id: toolCallId,
+        approved: true
+    };
+    
+    await resumeWithConfirmation([confirmation]);
+}
 
-def get_current_user(token: str = Depends(security)):
-    # Validate token
-    # Return user info
-    return {"user_id": "user123"}
-
-@app.post("/api/chat")
-async def chat(request: ChatRequest, user = Depends(get_current_user)):
-    # Use user["user_id"] for session management
-    session_id = f"{user['user_id']}-{request.session_id}"
-    # ... rest of code ...
+async function rejectToolCall(toolCallId) {
+    const reason = prompt('Reason for rejection:');
+    const confirmation = {
+        tool_call_id: toolCallId,
+        approved: false,
+        reason: reason
+    };
+    
+    await resumeWithConfirmation([confirmation]);
+}
 ```
 
 ---
 
-## General Challenges
+## Final Integration Challenge
 
-### Challenge 1: Multi-Agent System
-Create a system where multiple agents can collaborate.
+### Build Complete Agent with All Features
+Create an agent that:
+1. Uses multiple tools (calculator, search, file operations)
+2. Has dangerous tools requiring confirmation
+3. Persists sessions across requests
+4. Displays execution trace
 
-### Challenge 2: Tool Marketplace
-Build a system to discover and share tools.
+**Solution:**
+```python
+import asyncio
+from agent_framework import (
+    Agent, LlmClient, InMemorySessionManager, 
+    ToolConfirmation, format_trace, tool
+)
+from agent_tools import calculator, search_web
 
-### Challenge 3: Advanced Memory
-Implement vector-based memory retrieval.
+@tool(
+    requires_confirmation=True,
+    confirmation_message="Delete '{arguments[filename]}'?"
+)
+def delete_file(filename: str) -> str:
+    """Delete a file."""
+    return f"Deleted {filename}"
 
-### Challenge 4: Cost Tracking
-Track and display API usage costs.
+async def main():
+    session_manager = InMemorySessionManager()
+    
+    agent = Agent(
+        model=LlmClient(model="gpt-4o-mini"),
+        tools=[calculator, search_web, delete_file],
+        instructions="You are a helpful assistant with file management capabilities.",
+        session_manager=session_manager
+    )
+    
+    session_id = "demo-session"
+    
+    # Conversation 1: Simple calculation
+    result1 = await agent.run("What is 25 * 17?", session_id=session_id)
+    print(f"Response: {result1.output}\n")
+    
+    # Conversation 2: Try dangerous action
+    result2 = await agent.run("Delete old_data.txt", session_id=session_id)
+    
+    if result2.status == "pending":
+        print("Agent wants to delete a file!")
+        print(f"Message: {result2.pending_tool_calls[0].confirmation_message}")
+        
+        # Approve the deletion
+        confirmation = ToolConfirmation(
+            tool_call_id=result2.pending_tool_calls[0].tool_call.tool_call_id,
+            approved=True
+        )
+        
+        result2 = await agent.run(
+            "", 
+            session_id=session_id,
+            tool_confirmations=[confirmation]
+        )
+    
+    print(f"Response: {result2.output}\n")
+    
+    # Conversation 3: Test memory
+    result3 = await agent.run(
+        "What calculations did I ask about earlier?", 
+        session_id=session_id
+    )
+    print(f"Response: {result3.output}\n")
+    
+    # Display trace
+    print(format_trace(result3.context))
 
-### Challenge 5: Monitoring Dashboard
-Create a dashboard to monitor agent performance.
+asyncio.run(main())
+```
 
 ---
 
@@ -683,4 +989,3 @@ Feel free to contribute additional exercises:
 2. Add exercise to appropriate episode section
 3. Include solution
 4. Submit pull request
-

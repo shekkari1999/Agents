@@ -1,7 +1,7 @@
 # Episode 9: Session & Memory Management
 
-**Duration**: 35 minutes  
-**What to Build**: `agent_framework/memory.py`, `agent_framework/callbacks.py`  
+**Duration**: 40 minutes  
+**What to Build**: `agent_framework/memory.py`, session integration in `agent.py`  
 **Target Audience**: Intermediate Python developers
 
 ---
@@ -13,8 +13,9 @@
 - Session persistence
 - Memory optimization
 - Token management
+- Full session integration with agent
 
-**Hook Statement**: "Today we'll add memory to our agent - it will remember conversations and optimize token usage. This makes agents truly useful for real applications!"
+**Hook Statement**: "Today we'll add memory to our agent - it will remember conversations across multiple interactions and optimize token usage. This makes agents truly useful for real applications!"
 
 ---
 
@@ -26,12 +27,13 @@
 - Token costs increase
 - Context windows limited
 - Need to remember across sessions
+- State must persist across agent runs
 
 **The Solution:**
 - Session persistence
 - Token counting
 - Memory optimization strategies
-- Callback system
+- Full integration with agent loop
 
 ---
 
@@ -49,13 +51,14 @@
 
 ---
 
-### 4. Live Coding: Building Memory System (25 min)
+### 4. Live Coding: Building Memory System (30 min)
 
 #### Step 1: Session Models (3 min)
 ```python
+# In agent_framework/models.py
 from pydantic import BaseModel, Field
 from datetime import datetime
-from .models import Event
+from typing import Any
 
 class Session(BaseModel):
     """Container for persistent conversation state."""
@@ -68,9 +71,9 @@ class Session(BaseModel):
 ```
 
 **Key Points:**
-- Stores events
-- Custom state
-- Timestamps
+- Stores events from conversation
+- Custom state for pending calls, etc.
+- Timestamps for tracking
 
 **Live Coding**: Build Session model
 
@@ -78,6 +81,7 @@ class Session(BaseModel):
 
 #### Step 2: Session Manager (5 min)
 ```python
+# In agent_framework/models.py
 from abc import ABC, abstractmethod
 
 class BaseSessionManager(ABC):
@@ -85,54 +89,195 @@ class BaseSessionManager(ABC):
     
     @abstractmethod
     async def create(self, session_id: str, user_id: str | None = None) -> Session:
+        """Create a new session."""
         pass
     
     @abstractmethod
     async def get(self, session_id: str) -> Session | None:
+        """Retrieve a session by ID. Returns None if not found."""
         pass
     
     @abstractmethod
     async def save(self, session: Session) -> None:
+        """Persist session changes to storage."""
         pass
     
     async def get_or_create(self, session_id: str, user_id: str | None = None) -> Session:
+        """Get existing session or create new one."""
         session = await self.get(session_id)
         if session is None:
             session = await self.create(session_id, user_id)
         return session
 
+
 class InMemorySessionManager(BaseSessionManager):
-    """In-memory session storage."""
+    """In-memory session storage for development and testing."""
     
     def __init__(self):
         self._sessions: dict[str, Session] = {}
     
     async def create(self, session_id: str, user_id: str | None = None) -> Session:
+        """Create a new session."""
+        if session_id in self._sessions:
+            raise ValueError(f"Session {session_id} already exists")
+        
         session = Session(session_id=session_id, user_id=user_id)
         self._sessions[session_id] = session
         return session
     
     async def get(self, session_id: str) -> Session | None:
+        """Retrieve a session by ID."""
         return self._sessions.get(session_id)
     
     async def save(self, session: Session) -> None:
-        session.updated_at = datetime.now()
+        """Save session to storage."""
         self._sessions[session.session_id] = session
 ```
 
 **Key Points:**
-- Abstract interface
-- In-memory implementation
+- Abstract interface for flexibility
+- In-memory implementation for development
 - Easy to extend (database, Redis, etc.)
 
 **Live Coding**: Build session managers
 
 ---
 
-#### Step 3: Token Counting (4 min)
+#### Step 3: Session Integration in Agent (8 min)
+
+**Update ExecutionContext:**
 ```python
+# In agent_framework/models.py
+@dataclass
+class ExecutionContext:
+    """Central storage for all execution state."""
+    
+    execution_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    events: List[Event] = field(default_factory=list)
+    current_step: int = 0
+    state: Dict[str, Any] = field(default_factory=dict)
+    final_result: Optional[str | BaseModel] = None
+    session_id: Optional[str] = None  # NEW: Link to session for persistence
+```
+
+**Update Agent.__init__:**
+```python
+class Agent:
+    def __init__(
+        self,
+        model: LlmClient,
+        tools: List[BaseTool] = None,
+        instructions: str = "",
+        max_steps: int = 5,
+        session_manager: BaseSessionManager | None = None  # NEW
+    ):
+        # ... other init ...
+        self.session_manager = session_manager or InMemorySessionManager()
+```
+
+**Update Agent.run() with Full Session Support:**
+```python
+async def run(
+    self, 
+    user_input: str, 
+    context: ExecutionContext = None,
+    session_id: Optional[str] = None,
+    tool_confirmations: Optional[List[ToolConfirmation]] = None
+) -> AgentResult:
+    """Execute the agent with optional session support.
+    
+    Args:
+        user_input: User's input message
+        context: Optional execution context (creates new if None)
+        session_id: Optional session ID for persistent conversations
+        tool_confirmations: Optional list of tool confirmations for pending calls
+    """
+    # Load or create session if session_id is provided
+    session = None
+    if session_id and self.session_manager:
+        session = await self.session_manager.get_or_create(session_id)
+        
+        # Load session data into context if context is new
+        if context is None:
+            context = ExecutionContext()
+            # Restore events and state from session
+            context.events = session.events.copy()
+            context.state = session.state.copy()
+            context.execution_id = session.session_id
+        context.session_id = session_id
+
+    if tool_confirmations:
+        if context is None:
+            context = ExecutionContext()
+        context.state["tool_confirmations"] = [
+            c.model_dump() for c in tool_confirmations
+        ]
+    
+    # Create or reuse context
+    if context is None:
+        context = ExecutionContext()
+    
+    # Add user input as the first event
+    user_event = Event(
+        execution_id=context.execution_id,
+        author="user",
+        content=[Message(role="user", content=user_input)]
+    )
+    context.add_event(user_event)
+    
+    # Execute steps until completion or max steps reached
+    while not context.final_result and context.current_step < self.max_steps:
+        await self.step(context)
+        
+        # Check for pending confirmations after each step
+        if context.state.get("pending_tool_calls"):
+            pending_calls = [
+                PendingToolCall.model_validate(p)
+                for p in context.state["pending_tool_calls"]
+            ]
+            # Save session state before returning
+            if session:
+                session.events = context.events
+                session.state = context.state
+                await self.session_manager.save(session)
+            return AgentResult(
+                status="pending",
+                context=context,
+                pending_tool_calls=pending_calls,
+            )
+        
+        # Check if the last event is a final response
+        last_event = context.events[-1]
+        if self._is_final_response(last_event):
+            context.final_result = self._extract_final_result(last_event)
+    
+    # Save session after execution completes
+    if session:
+        session.events = context.events
+        session.state = context.state
+        await self.session_manager.save(session)
+
+    return AgentResult(output=context.final_result, context=context)
+```
+
+**Key Points:**
+- Load session at start of run()
+- Restore events and state from session
+- Set `context.session_id` for tracking
+- Save session before returning pending
+- Save session after completion
+
+**Live Coding**: Integrate session with agent
+
+---
+
+#### Step 4: Token Counting (4 min)
+```python
+# In agent_framework/memory.py
 import tiktoken
+import json
 from .llm import build_messages
+from .models import LlmRequest
 
 def count_tokens(request: LlmRequest, model_id: str = "gpt-4") -> int:
     """Calculate total token count of LlmRequest."""
@@ -167,7 +312,7 @@ def count_tokens(request: LlmRequest, model_id: str = "gpt-4") -> int:
 ```
 
 **Key Points:**
-- Uses tiktoken
+- Uses tiktoken for accurate counting
 - Counts messages, tool calls, tools
 - Model-specific encoding
 
@@ -175,8 +320,11 @@ def count_tokens(request: LlmRequest, model_id: str = "gpt-4") -> int:
 
 ---
 
-#### Step 4: Sliding Window (4 min)
+#### Step 5: Sliding Window (4 min)
 ```python
+# In agent_framework/memory.py
+from .models import Message
+
 def apply_sliding_window(
     context: ExecutionContext,
     request: LlmRequest,
@@ -215,8 +363,11 @@ def apply_sliding_window(
 
 ---
 
-#### Step 5: Compaction (4 min)
+#### Step 6: Compaction (4 min)
 ```python
+# In agent_framework/memory.py
+from .models import ToolCall, ToolResult
+
 TOOLRESULT_COMPACTION_RULES = {
     "read_file": "File content from {file_path}. Re-read if needed.",
     "search_web": "Search results processed. Query: {query}. Re-search if needed.",
@@ -263,9 +414,14 @@ def apply_compaction(context: ExecutionContext, request: LlmRequest) -> None:
 
 ---
 
-#### Step 6: Callback System (3 min)
+#### Step 7: Optimizer Callback (3 min)
 ```python
-from .callbacks import create_optimizer_callback
+# In agent_framework/callbacks.py
+import inspect
+from typing import Callable, Optional
+from .models import ExecutionContext
+from .llm import LlmRequest, LlmResponse
+from .memory import count_tokens
 
 def create_optimizer_callback(
     apply_optimization: Callable,
@@ -299,42 +455,84 @@ def create_optimizer_callback(
 
 ---
 
-#### Step 7: Integrating with Agent (2 min)
+### 5. Testing Session Integration (3 min)
+
+**Test Session Persistence:**
 ```python
-from agent_framework.memory import apply_sliding_window, create_optimizer_callback
+import asyncio
+from agent_framework import Agent, LlmClient, InMemorySessionManager
+from agent_tools import calculator
 
-optimizer = create_optimizer_callback(
-    apply_optimization=apply_sliding_window,
-    threshold=30000
-)
+# Create a shared session manager
+session_manager = InMemorySessionManager()
 
+# Create agent with session support
 agent = Agent(
     model=LlmClient(model="gpt-4o-mini"),
     tools=[calculator],
-    before_llm_callback=optimizer  # Add callback
+    instructions="You are a helpful assistant.",
+    session_manager=session_manager
 )
+
+session_id = "user-123"
+
+# First conversation - introduce yourself
+result1 = await agent.run(
+    "Hi! My name is Alice and I'm a software engineer.",
+    session_id=session_id
+)
+print(f"Response 1: {result1.output}")
+print(f"Events: {len(result1.context.events)}")
+
+# Second conversation - continue
+result2 = await agent.run(
+    "What's 1234 * 5678?",
+    session_id=session_id
+)
+print(f"Response 2: {result2.output}")
+print(f"Events: {len(result2.context.events)}")  # Should include previous events!
+
+# Third conversation - test memory
+result3 = await agent.run(
+    "What's my name and what do I do for work?",
+    session_id=session_id
+)
+print(f"Response 3: {result3.output}")
+# Should remember: "Your name is Alice and you're a software engineer."
+
+# Different session - should NOT remember
+result4 = await agent.run(
+    "What's my name?",
+    session_id="different-user"
+)
+print(f"Response 4: {result4.output}")
+# Should say it doesn't know
 ```
 
-**Key Points:**
-- Add to agent
-- Automatic optimization
-- Configurable threshold
-
-**Live Coding**: Integrate with agent
+**Test Session Isolation:**
+```python
+# Check stored sessions
+print("Session Storage Summary:")
+for sid, session in session_manager._sessions.items():
+    print(f"Session ID: {session.session_id}")
+    print(f"  Events: {len(session.events)}")
+    print(f"  State keys: {list(session.state.keys())}")
+```
 
 ---
 
-### 5. Demo: Memory in Action (3 min)
+### 6. Demo: Memory in Action (3 min)
 
 **Show:**
-- Session persistence
+- Session persistence across runs
 - Token counting
-- Sliding window
+- Sliding window optimization
 - Long conversation handling
+- Session isolation between users
 
 ---
 
-### 6. Next Steps (1 min)
+### 7. Next Steps (1 min)
 
 **Preview Episode 10:**
 - Web deployment
@@ -342,55 +540,119 @@ agent = Agent(
 - Frontend interface
 
 **What We Built:**
-- Session management
-- Memory optimization
-- Token management
+- Session model and managers
+- Full session integration with Agent.run()
+- Token counting
+- Memory optimization strategies
 
 ---
 
 ## Key Takeaways
 
-1. **Sessions** persist conversations
-2. **Token counting** tracks usage
-3. **Optimization strategies** reduce costs
-4. **Callbacks** enable extensibility
-5. **Configurable** thresholds
+1. **Sessions** persist conversations across multiple run() calls
+2. **session_id** links context to session
+3. **Events and state** are restored from session
+4. **Session saves** on pending and completion
+5. **Token counting** tracks usage
+6. **Optimization strategies** reduce costs
 
 ---
 
 ## Common Mistakes
 
-**Mistake 1: Not saving sessions**
+**Mistake 1: Not loading session state**
 ```python
-# Wrong - loses state
-result = await agent.run("Hello", session_id="user-123")
-# Missing: session.save()
+# Wrong - creates empty context
+if context is None:
+    context = ExecutionContext()
 
-# Right - persists state
-result = await agent.run("Hello", session_id="user-123")
-# Agent automatically saves
+# Right - loads from session
+if context is None:
+    context = ExecutionContext()
+    context.events = session.events.copy()
+    context.state = session.state.copy()
 ```
 
-**Mistake 2: Too aggressive optimization**
+**Mistake 2: Not saving before pending return**
 ```python
-# Wrong - loses important context
-window_size = 5  # Too small!
+# Wrong - loses state on pending
+if context.state.get("pending_tool_calls"):
+    return AgentResult(status="pending", ...)
 
-# Right - balanced
-window_size = 20  # Keeps enough context
+# Right - saves before returning
+if context.state.get("pending_tool_calls"):
+    if session:
+        session.events = context.events
+        session.state = context.state
+        await self.session_manager.save(session)
+    return AgentResult(status="pending", ...)
+```
+
+**Mistake 3: Mutating session directly**
+```python
+# Wrong - might not persist
+session.events.append(new_event)
+
+# Right - copy and save
+session.events = context.events  # Full replacement
+await self.session_manager.save(session)
 ```
 
 ---
 
 ## Exercises
 
-1. Implement database session manager
-2. Add summarization strategy
-3. Create token usage dashboard
-4. Add memory analytics
+1. **Implement Database Session Manager**: Create a PostgreSQL or SQLite session manager
+2. **Add Session Expiry**: Auto-delete sessions after 24 hours of inactivity
+3. **Build Token Dashboard**: Track token usage per session
+4. **Add Summarization Strategy**: Use LLM to summarize old history
+
+---
+
+## Complete Session Flow
+
+```
+User Request with session_id="user-123"
+    |
+    v
+Agent.run(session_id="user-123")
+    |
+    v
+session_manager.get_or_create("user-123")
+    |
+    v
+[New Session?] --Yes--> Create empty Session
+    |                        |
+    No                       |
+    |                        v
+    v                   context = ExecutionContext()
+Load existing Session       |
+    |                        v
+    v               context.events = []
+context = ExecutionContext()
+context.events = session.events.copy()
+context.state = session.state.copy()
+    |
+    v
+Execute agent loop (step, step, ...)
+    |
+    +--[Pending?]--Yes--> Save session, return pending
+    |
+    No
+    |
+    v
+Complete execution
+    |
+    v
+session.events = context.events
+session.state = context.state
+await session_manager.save(session)
+    |
+    v
+Return AgentResult(status="complete")
+```
 
 ---
 
 **Previous Episode**: [Episode 8: MCP Integration](./EPISODE_08_MCP.md)  
 **Next Episode**: [Episode 10: Web Deployment](./EPISODE_10_WEB_DEPLOYMENT.md)
-

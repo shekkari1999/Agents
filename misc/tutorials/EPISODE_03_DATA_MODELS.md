@@ -1,6 +1,6 @@
 # Episode 3: Core Data Models
 
-**Duration**: 30 minutes  
+**Duration**: 35 minutes  
 **What to Build**: `agent_framework/models.py`  
 **Target Audience**: Intermediate Python developers
 
@@ -13,6 +13,7 @@
 - Complete data model structure
 - Type-safe message handling
 - Execution tracking
+- Tool confirmation workflow
 
 **Hook Statement**: "Today we'll build the data structures that power our entire agent framework. These models ensure type safety and make our code predictable."
 
@@ -35,13 +36,13 @@
 
 ---
 
-### 3. Concept: Building Our Models (20 min)
+### 3. Concept: Building Our Models (25 min)
 
 #### 3.1 Message Model (3 min)
 
 **What is a Message?**
 - Text content in conversation
-- Has a role (system, user, assistant, tool)
+- Has a role (system, user, assistant)
 - Simple but critical
 
 **Implementation:**
@@ -52,7 +53,7 @@ from typing import Literal
 class Message(BaseModel):
     """A text message in the conversation."""
     type: Literal["message"] = "message"
-    role: Literal["system", "user", "assistant", "tool"]
+    role: Literal["system", "user", "assistant"]
     content: str
 ```
 
@@ -139,7 +140,73 @@ ContentItem = Union[Message, ToolCall, ToolResult]
 
 ---
 
-#### 3.5 Event Model (4 min)
+#### 3.5 ToolConfirmation Model (3 min)
+
+**What is ToolConfirmation?**
+- User's decision on a pending tool call
+- Can approve or reject
+- Can modify arguments before execution
+
+**Implementation:**
+```python
+class ToolConfirmation(BaseModel):
+    """User's decision on a pending tool call."""
+    
+    tool_call_id: str
+    approved: bool
+    modified_arguments: dict | None = None
+    reason: str | None = None  # Reason for rejection (if not approved)
+```
+
+**Why This Model?**
+- Some tools are dangerous (delete file, send email)
+- Users should approve before execution
+- Allows argument modification (e.g., change file path)
+- Captures rejection reasons for debugging
+
+**Use Cases:**
+- Delete file confirmation
+- API call approval
+- Email sending confirmation
+- Database modification
+
+**Live Coding**: Build ToolConfirmation model
+
+---
+
+#### 3.6 PendingToolCall Model (2 min)
+
+**What is PendingToolCall?**
+- A tool call awaiting user confirmation
+- Contains the original ToolCall
+- Has a confirmation message to show user
+
+**Implementation:**
+```python
+class PendingToolCall(BaseModel):
+    """A tool call awaiting user confirmation."""
+    
+    tool_call: ToolCall
+    confirmation_message: str
+```
+
+**Key Points:**
+- Wraps the original ToolCall
+- `confirmation_message` explains what will happen
+- Agent pauses until user responds
+
+**Flow:**
+1. Agent decides to call dangerous tool
+2. Creates PendingToolCall with message
+3. Returns to user for approval
+4. User submits ToolConfirmation
+5. Agent continues or skips based on approval
+
+**Live Coding**: Build PendingToolCall model
+
+---
+
+#### 3.7 Event Model (4 min)
 
 **What is an Event?**
 - Recorded step in execution
@@ -170,7 +237,7 @@ class Event(BaseModel):
 
 ---
 
-#### 3.6 ExecutionContext Dataclass (5 min)
+#### 3.8 ExecutionContext Dataclass (5 min)
 
 **What is ExecutionContext?**
 - Central state container
@@ -191,7 +258,7 @@ class ExecutionContext:
     current_step: int = 0
     state: Dict[str, Any] = field(default_factory=dict)
     final_result: Optional[str | BaseModel] = None
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None  # Link to session for persistence
     
     def add_event(self, event: Event):
         """Append an event to the execution history."""
@@ -206,6 +273,10 @@ class ExecutionContext:
 - Mutable state needs to be lightweight
 - No validation needed (internal use)
 - Better performance
+
+**Key Fields:**
+- `state`: Store pending tool calls, confirmations, custom data
+- `session_id`: Links to session for persistence
 
 **Live Coding**: Build ExecutionContext
 
@@ -230,6 +301,34 @@ tool_call = ToolCall(
 print(tool_call.name)  # "calculator"
 ```
 
+**Test ToolConfirmation:**
+```python
+# User approves with modification
+confirmation = ToolConfirmation(
+    tool_call_id="call_123",
+    approved=True,
+    modified_arguments={"expression": "2+3"}  # Changed!
+)
+print(confirmation.approved)  # True
+
+# User rejects with reason
+rejection = ToolConfirmation(
+    tool_call_id="call_456",
+    approved=False,
+    reason="I don't want to delete that file"
+)
+print(rejection.reason)  # "I don't want to delete that file"
+```
+
+**Test PendingToolCall:**
+```python
+pending = PendingToolCall(
+    tool_call=tool_call,
+    confirmation_message="The agent wants to calculate '2+2'. Do you approve?"
+)
+print(pending.confirmation_message)
+```
+
 **Test Event:**
 ```python
 event = Event(
@@ -247,13 +346,16 @@ context.add_event(event)
 print(context.current_step)  # 0
 context.increment_step()
 print(context.current_step)  # 1
+
+# Store pending tool calls in state
+context.state["pending_tool_calls"] = [pending.model_dump()]
 ```
 
 ---
 
 ### 5. Why Pydantic vs Dataclass? (2 min)
 
-**Pydantic (Message, ToolCall, ToolResult, Event):**
+**Pydantic (Message, ToolCall, ToolResult, Event, ToolConfirmation, PendingToolCall):**
 - Data crossing boundaries
 - Needs validation
 - Serialization required
@@ -278,6 +380,7 @@ print(context.current_step)  # 1
 - Type safety in action
 - Validation catching errors
 - Serialization working
+- Confirmation workflow
 
 ---
 
@@ -289,9 +392,10 @@ print(context.current_step)  # 1
 - Parsing API responses
 
 **What We Built:**
-- Complete data model structure
-- Type-safe message handling
-- Execution tracking
+- 7 Pydantic models: Message, ToolCall, ToolResult, ToolConfirmation, PendingToolCall, Event
+- 1 Dataclass: ExecutionContext
+- ContentItem union type
+- Complete data model structure matching actual codebase
 
 ---
 
@@ -302,6 +406,8 @@ print(context.current_step)  # 1
 3. **Union types** enable polymorphism
 4. **Field(default_factory=...)** prevents shared defaults
 5. **Dataclass** for mutable internal state
+6. **ToolConfirmation** enables user approval workflow
+7. **PendingToolCall** pauses execution for confirmation
 
 ---
 
@@ -329,17 +435,113 @@ def process(event: Event) -> List[ContentItem]:
     return event.content
 ```
 
+**Mistake 3: Forgetting optional fields**
+```python
+# Wrong - reason required even for approval
+class BadConfirmation(BaseModel):
+    approved: bool
+    reason: str  # Always required!
+
+# Right - reason optional
+class GoodConfirmation(BaseModel):
+    approved: bool
+    reason: str | None = None  # Only needed for rejection
+```
+
 ---
 
 ## Exercises
 
-1. Add a `metadata` field to Event
-2. Create a `UserMessage` model that extends Message
-3. Add validation to ensure content is not empty
-4. Create a helper function to extract all messages from events
+1. **Build ToolConfirmation Validator**: Add validation that `reason` is required when `approved=False`
+2. **Create Helper Function**: Write `extract_pending_calls(context: ExecutionContext) -> List[PendingToolCall]`
+3. **Add Metadata to Event**: Add an optional `metadata: dict` field to Event for custom data
+4. **Create ToolCallWithResult Model**: Combine ToolCall and ToolResult into a single model for reporting
+
+---
+
+## Complete models.py File
+
+```python
+"""Core data models for the agent framework."""
+
+from typing import Literal, Union, List, Dict, Optional, Any
+from pydantic import BaseModel, Field
+from dataclasses import dataclass, field
+import uuid
+from datetime import datetime
+
+
+class Message(BaseModel):
+    """A text message in the conversation."""
+    type: Literal["message"] = "message"
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class ToolCall(BaseModel):
+    """LLM's request to execute a tool."""
+    type: Literal["tool_call"] = "tool_call"
+    tool_call_id: str
+    name: str
+    arguments: dict
+
+
+class ToolResult(BaseModel):
+    """Result from tool execution."""
+    type: Literal["tool_result"] = "tool_result"
+    tool_call_id: str
+    name: str
+    status: Literal["success", "error"]
+    content: list
+
+
+ContentItem = Union[Message, ToolCall, ToolResult]
+
+
+class ToolConfirmation(BaseModel):
+    """User's decision on a pending tool call."""
+    
+    tool_call_id: str
+    approved: bool
+    modified_arguments: dict | None = None
+    reason: str | None = None
+
+
+class PendingToolCall(BaseModel):
+    """A tool call awaiting user confirmation."""
+    
+    tool_call: ToolCall
+    confirmation_message: str
+
+
+class Event(BaseModel):
+    """A recorded occurrence during agent execution."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    execution_id: str
+    timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
+    author: str
+    content: List[ContentItem] = Field(default_factory=list)
+
+
+@dataclass
+class ExecutionContext:
+    """Central storage for all execution state."""
+    
+    execution_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    events: List[Event] = field(default_factory=list)
+    current_step: int = 0
+    state: Dict[str, Any] = field(default_factory=dict)
+    final_result: Optional[str | BaseModel] = None
+    session_id: Optional[str] = None
+    
+    def add_event(self, event: Event):
+        self.events.append(event)
+    
+    def increment_step(self):
+        self.current_step += 1
+```
 
 ---
 
 **Previous Episode**: [Episode 2: Your First LLM Call](./EPISODE_02_LLM_CALL.md)  
 **Next Episode**: [Episode 4: The LLM Client](./EPISODE_04_LLM_CLIENT.md)
-
