@@ -4,13 +4,18 @@ This directory contains all materials for the "Building an AI Agent Framework fr
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 ### Core Documentation
 - **[FEATURE_DOCUMENTATION.md](./FEATURE_DOCUMENTATION.md)**: Complete inventory of all framework features
 - **[ARCHITECTURE_DIAGRAMS.md](./ARCHITECTURE_DIAGRAMS.md)**: Visual diagrams using Mermaid syntax
 - **[GITHUB_STRUCTURE.md](./GITHUB_STRUCTURE.md)**: Repository organization and branch strategy
 - **[EXERCISES.md](./EXERCISES.md)**: Exercises and challenges for each episode
+- **[ADDITIONAL_EXERCISES.md](./ADDITIONAL_EXERCISES.md)**: Cross-topic challenges and integration exercises
+
+### Career & Next Steps
+- **[RESUME_GUIDE.md](./RESUME_GUIDE.md)**: How to market this project for AI engineering roles
+- **[NEXT_STEPS.md](./NEXT_STEPS.md)**: Complementary skills & learning path after completion
 
 ---
 
@@ -114,15 +119,26 @@ Episode 10: Deployment
 
 ---
 
-## 📁 File Structure
+## File Structure
 
 ```
 misc/tutorials/
 ├── README.md (this file)
+│
+├── # Core Documentation
 ├── FEATURE_DOCUMENTATION.md
 ├── ARCHITECTURE_DIAGRAMS.md
 ├── GITHUB_STRUCTURE.md
+│
+├── # Exercises
 ├── EXERCISES.md
+├── ADDITIONAL_EXERCISES.md
+│
+├── # Career & Learning
+├── RESUME_GUIDE.md
+├── NEXT_STEPS.md
+│
+├── # Episode Guides
 ├── EPISODE_01_INTRODUCTION.md
 ├── EPISODE_02_LLM_CALL.md
 ├── EPISODE_03_DATA_MODELS.md
@@ -226,17 +242,35 @@ Questions or issues?
 
 ---
 
-## 🎉 Series Completion
+## Series Completion
 
 After completing all 10 episodes, you will have:
 
-✅ Built a complete AI agent framework  
-✅ Understand every component  
-✅ Created production-ready code  
-✅ Deployed a web application  
-✅ Gained deep understanding of agent architecture
+- Built a complete AI agent framework  
+- Understand every component  
+- Created production-ready code  
+- Deployed a web application  
+- Gained deep understanding of agent architecture
 
 **Congratulations on your learning journey!**
+
+### What's Next?
+
+Check out **[NEXT_STEPS.md](./NEXT_STEPS.md)** for:
+- RAG (Retrieval Augmented Generation)
+- Multi-Agent Systems
+- Observability & Tracing
+- Evaluation & Benchmarking
+- Safety & Guardrails
+- LLM Routing & Optimization
+
+### Career Guidance
+
+See **[RESUME_GUIDE.md](./RESUME_GUIDE.md)** for:
+- How to market this project
+- Resume bullet points (STAR method)
+- Interview talking points
+- Portfolio presentation tips
 
 ---
 
